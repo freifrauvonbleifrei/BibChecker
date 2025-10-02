@@ -142,9 +142,6 @@ class Citation:
 
 
     def validate(self):
-        if self.url:
-            self.check_url(self.url)
-
         if not self.title:
             return
 
@@ -208,45 +205,6 @@ class Citation:
             self.match_url = url
 
         return max_match
-
-
-
-    def check_url(self, api_url):
-        self.url_exists = False
-        headers = {
-            "User-Agent": (
-                "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
-                "AppleWebKit/537.36 (KHTML, like Gecko) "
-                "Chrome/118.0.0.0 Safari/537.36"
-            ),
-            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-            "Accept-Language": "en-US,en;q=0.9",
-        }
-
-        try:
-            # First try HEAD
-            r = requests.head(api_url, allow_redirects=True, timeout=20, headers=headers)
-            if r.status_code < 400:
-                self.url_exists = True
-                return
-        
-            # If HEAD fails, try GET (some servers reject HEAD)
-            r = requests.get(api_url, stream=True, allow_redirects=True, timeout=20, headers=headers)
-            if r.status_code < 400:
-                self.url_exists = True
-                return
-
-        except requests.RequestException:
-            pass
-
-        if "doi.org" in self.url:
-            current_url = api_url
-            doi = urlparse(self.url).path.lstrip("/")  # extract DOI from URL
-            api_url = f"https://api.crossref.org/works/{doi}"
-            if (api_url != current_url):
-                self.check_url(api_url)
-
-
 
     def check_arxiv_link(self):
         api_url = f"http://export.arxiv.org/api/query?id_list={self.arxiv_id}"
