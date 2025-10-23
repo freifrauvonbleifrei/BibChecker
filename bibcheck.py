@@ -17,33 +17,20 @@ from requests.exceptions import Timeout
 from httpx import HTTPStatusError
 from time import sleep
 from urllib.parse import urlparse
+import arxiv
+import Levenshtein
 
 
 
 cr = Crossref(timeout=30)
+client = arxiv.Client()
 
 class Citation:
-    number = ""
-    entry = ""
-
-    title = ""
-    venue = ""
-    authors = ""
-    doi = ""
-    url = ""
-
-    match_title = ""
-    match_venue = ""
-    match_url = ""
-    match_authors = ""
-    match_percent = ""
-
     def __init__(self, number, entry):
         self.match = False
         self.match_percent = 0
 
         self.number = number
-        self.entry = entry
 
         self.title = None
         self.authors = None
@@ -55,6 +42,13 @@ class Citation:
 
         author_block = None
         self.arxiv_id = None
+
+        self.match_title = None
+        self.match_authors = None
+        self.match_percent = 0
+        self.match_venue = None
+        self.match_url = None
+
 
         # Find URL, if one is included
         url_match = re.search(r"(https?://[^\s]+(?:\s*[^\s]+)*)", entry, re.MULTILINE)
@@ -78,25 +72,70 @@ class Citation:
             if not self.url:
                 self.url = f"https://doi.org/{self.doi}"
 
+        entry = unicodedata.normalize("NFKC", entry)
+        entry = re.sub(r'\s*([\u0300-\u036F])\s*', r'\1', entry)
+        entry = unicodedata.normalize("NFC", entry)
+        entry = entry.replace('-\n', '')
+        entry = entry.replace('\n', ' ')
+        entry = entry.replace(', et al', '')
+        entry = entry.replace('et al', '')
+        self.entry = entry
+
         # Split into title, author, venue
         m = re.search(
-            r"^(.*?)['“\"](.+?)['”\"](?:\s*,?\s*(.+?))?(?:[.,]?\s*\d{4}.*)?$",
+            r'^(.*?)["“”](.+?)["“”]',
             entry,
-            re.DOTALL
+            re.DOTALL | re.UNICODE
         )
         if m:
             author_block = m.group(1).strip(" ,")
             self.title = m.group(2).strip()
-            self.venue = m.group(3).strip(" .,;")        
         else:
-            # Book / fallback
-            # Split off the year at the end
-            parts = re.split(r",?\s*(\d{4})[.,]?\s*$", entry)
-            if len(parts) >= 2:
-                pre_year = parts[0]   
-                if "," in pre_year:
-                    author_block, title_part = pre_year.split(",", 1)
-                    self.title = re.split(r"\.\s*", title_part, maxsplit=1)[0].strip()
+            m = entry.split('.')
+
+            authors = ""
+            title = ""
+            split = False
+            for fragment in m:
+                names = fragment.split(', ')
+                for name in names:
+                    if not split:
+                        auths = True 
+                        split_and = name.split('and')
+                        for word in split_and:
+                            if len(word.split()) > 2:
+                                auths = False
+                                break
+                        if auths:
+                            authors += name
+                        elif re.search(r"\b[A-Z]\s?\.", name):
+                            authors += name
+                        elif re.search(r"(^|\s)(?![IA](\s|$))[A-Z](\s|$)", name): # Middle Initial, forgot the period
+                            print(name)
+                            authors += name
+                        else:
+                            split = True
+                            title += name
+                    else:
+                        if name.split()[0] in ["in Proceeding", "pages", "pp", "sec", "vol", "Vol", "Sec", "Pages", "volume"]:
+                            break
+                        title += name
+                if split:
+                    break
+
+            year_match = re.search(r',\s*(\d{4})$', title)
+            if year_match:
+                year = year_match.group(1)
+                title = title.replace(year, '')
+            title = title.split('?')[0]
+            author_block = authors
+
+            self.title = title
+
+
+
+        self.title = self.title.rstrip(' ,')
+        
 
         ## Split authors into list of lowercase last names
         if author_block:
@@ -111,39 +150,80 @@ class Citation:
                 self.authors.append(surname)
         
         self.norm_title = None
-        self.norm_hyphen_title = None
-        self.title_tokens = None
-        self.title_no_numbers = None
-        self.search_title = None
-
+        self.norm_hypen_title = None
         if self.title:
             self.norm_title = normalize_text(self.title)
-            self.norm_hyphen_title = remove_newlines(self.norm_title)
-            self.norm_title = remove_hyphens(self.norm_title)
+            self.norm_hyphen_title = normalize_hyphen_text(self.title)
 
-            self.title_tokens = create_tokens(self.norm_title) 
-            self.title_hyphen_tokens = create_tokens(self.norm_hyphen_title)
-            self.title_no_numbers = strip_numbers(self.norm_title)
-            self.search_title = quote_plus(f"ti:{self.title_no_numbers.replace("-", " ")}")
 
-        if "github.com" in self.entry.lower():
+
+        lower = self.entry.lower()
+        lower = lower.replace('\n', '')
+        lower = lower.replace(' ', '')
+
+        if "github.com" in lower:
             self.match_percent = 0.99
             self.match_title = "GitHub Repository"
-        elif "docs.amd.com" in self.entry.lower():
+        elif "https://gitlab" in lower:
+            self.match_percent = 0.99
+            self.match_title = "GitLab Repository"
+        elif "docs.amd.com" in lower:
             self.match_percent = 0.99
             self.match_title = "AMD Docs"
-        elif "developer.nvidia.com" in self.entry.lower():
+        elif "developer.nvidia.com" in lower:
             self.match_percent = 0.99
             self.match_title = "NVIDIA Docs"
-        elif ".pdf" in self.entry.lower():
+        elif ".pdf" in lower:
             self.match_percent = 0.99
             self.match_title = "Included .pdf Link"
-
+        elif "ofiwg.github.io" in lower:
+            self.match_percent = 0.99
+            self.match_title = "Libfabric"
+        elif "www.kernel.org" in lower:
+            self.match_percent = 0.99
+            self.match_title = "Linux"
+        elif "gnuplot.sourceforge.net" in lower:
+            self.match_percent = 0.99
+            self.match_title = "GNUPlot"
+        elif "mvapich.cse.ohio-state.edu" in lower:
+            self.match_percent = 0.99
+            self.match_title = "MVAPICH"
+        elif "lapackuser" in lower and "guide" in lower:
+            self.match_percent = 0.99
+            self.match_title = "LAPACK"
+        elif "huggingface" in lower:
+            self.match_percent = 0.99
+            self.match_title = "Huggingface"
+        elif "https" in lower and "blog" in lower:
+            self.match_percent = 0.99
+            self.match_title = "Blog Post"
+        elif "top500.org" in lower:
+            self.match_percent = 0.99
+            self.match_title = "Top 500"
+        elif "docs.nersc.gov" in lower:
+            self.match_percent = 0.99
+            self.match_title = "NERSC"
+        elif "nasparallelbenchmarks" in lower:
+            self.match_percent = 0.99
+            self.match_title = "NAS"
+        elif "valgrind.org" in lower:
+            self.match_percent = 0.99
+            self.match_title = "Valgrind"
+        elif "mpistandard" in lower or "mpi:amessagepassinginterface" in lower:
+            self.match_percent = 0.99
+            self.match_title = "MPI"
+        elif "doku.lrz.de" in lower:
+            self.match_percent = 0.99
+            self.match_title = "Leibniz Supercomputing"
+        elif "aws.amazon.com" in lower:
+            self.match_percent = 0.99
+            self.match_title = "AWS"
 
 
     def validate(self):
         if not self.title:
             return
+
 
         if self.arxiv_id:
             self.check_arxiv_link()
@@ -158,53 +238,67 @@ class Citation:
         if self.match_percent == 1.0:
             return
 
-        self.search_openalex()
+        self.search_openalex(self.title)
         if self.match_percent == 1.0:
             return
 
-        self.search_googlebooks()
+        self.search_openalex(self.norm_title)
         if self.match_percent == 1.0:
             return
 
-        self.search_arxiv()
+        self.search_openalex(self.norm_hyphen_title)
         if self.match_percent == 1.0:
             return
 
-        self.search_crossref()
+        self.search_arxiv(self.norm_title)
         if self.match_percent == 1.0:
             return
 
+        self.search_arxiv(self.norm_hyphen_title)
+        if self.match_percent == 1.0:
+            return
+
+        self.search_googlebooks(self.norm_title)
+        if self.match_percent == 1.0:
+            return
+
+        self.search_googlebooks(self.norm_hyphen_title)
+        if self.match_percent == 1.0:
+            return
+
+        self.search_crossref(self.norm_title)
+        if self.match_percent == 1.0:
+            return
+
+        self.search_crossref(self.norm_hyphen_title)
+        if self.match_percent == 1.0:
+            return
+
+    def sequence_similarity(self, found):
+        norm_found = normalize_text(found)
+
+        score = max(Levenshtein.ratio(self.norm_title, norm_found),
+                   Levenshtein.ratio(self.norm_hyphen_title, norm_found))
+
+        if ":" in self.title:
+            score = max(score, Levenshtein.ratio(normalize_text(self.title.split(':')[0]), norm_found))
+
+        return score
 
     def compare(self, title, authors, venue, url):
         if not title:
             return
 
-        norm_found_title = normalize_text(title)
-        found_tokens = create_tokens(norm_found_title)
-        overlap = len(self.title_tokens & found_tokens)
-        match_percent = (1.0 * overlap) / max(len(self.title_tokens), len(found_tokens))
-        max_match = match_percent
+        match_percent = self.sequence_similarity(title)
 
-        if (match_percent > self.match_percent and authors_overlap(self.authors, authors)):
+        if (match_percent > self.match_percent):
             self.match_percent = match_percent
             self.match_title = title
             self.match_authors = authors
             self.match_venue = venue
             self.match_url = url
 
-        overlap = len(self.title_hyphen_tokens & found_tokens)
-        match_percent = (1.0 * overlap) / max(len(self.title_hyphen_tokens), len(found_tokens))
-        if match_percent > max_match:
-            max_match = match_percent
-
-        if (match_percent > self.match_percent and authors_overlap(self.authors, authors)):
-            self.match_percent = match_percent
-            self.match_title = title
-            self.match_authors = authors
-            self.match_venue = venue
-            self.match_url = url
-
-        return max_match
+        return match_percent
 
     def check_arxiv_link(self):
         api_url = f"http://export.arxiv.org/api/query?id_list={self.arxiv_id}"
@@ -287,9 +381,9 @@ class Citation:
             print("DataCite error:", e)
             self.id_match = 0
         
-    def search_crossref(self):
+    def search_crossref(self, title):
         try:
-            result = cr.works(query_title = self.title_no_numbers, limit = 30)
+            result = cr.works(query = title, limit = 10)
             items = result.get("message", {}).get("items", [])
             for item in items:
                 title = item.get("title", [""])[0]
@@ -298,51 +392,80 @@ class Citation:
                 if item.get("container-title"):
                     venue = item.get("container-title", [""])[0]
                 self.compare(title, authors, venue, None)
+                if self.match_percent >= 0.99:
+                    break
         except Timeout:
             print("Crossref timeout, retrying")
             sleep(2)
-            self.search_crossref()
+            self.search_crossref(title)
         except RuntimeError as e:
             if "timed out" in str(e).lower():
                 print("Crossref timeout, retrying")
                 sleep(2)
-                self.check_doi()
+                self.search_crossref(title)
             else:
                 raise
 
 
-    def search_openalex(self):    
-        url = f"https://api.openalex.org/works?filter=title.search:{self.search_title}"
+    def search_openalex(self, title):    
+        query = quote_plus(title)
+        url = f"https://api.openalex.org/works?search={query}&per-page=10"
         try:
             r = requests.get(url, timeout=30)
-            if r.status_code == 200:
-                data = r.json()
-                for item in data.get("results", []):
-                    title = item.get("title", "")
-                    authors = [a["author"]["display_name"] for a in item.get("authorships", [])]
-                    venue = item.get("host_venue", {}).get("display_name")
-                    self.compare(title, authors, venue, url)
+            if r.status_code != 200:
+                print(f"OpenAlex search failed ({r.status_code}): {url}")
+                return
+
+            data = r.json()
+            results = data.get("results", [])
+
+            # iterate over the top 10 results
+            for i, work in enumerate(results[:10], start=1):
+                title = work.get("title", "")
+                authors = [a["author"]["display_name"] for a in work.get("authorships", [])]
+                venue = work.get("host_venue", {}).get("display_name", "")
+                link = work.get("id")  # canonical OpenAlex work ID URL
+
+                # compare against your reference
+                self.compare(title, authors, venue, link)
+
+                if self.match_percent >= 0.99:
+                    return
+
         except requests.exceptions.Timeout:
-            print("OpenAlex timeout on url, retrying", url)
+            print("OpenAlex timeout, retrying", url)
             sleep(2)
-            self.search_openalex()
+            self.search_openalex(title)  # pass title again to retry
 
-    def search_arxiv(self):
-        url = f"http://export.arxiv.org/api/query?search_query={self.search_title}&max_results=10"
+        except Exception as e:
+            print("OpenAlex search error:", e)
+
+
+    def search_arxiv(self, title):
         try:
-            feed = feedparser.parse(url)
+            search = arxiv.Search(
+                query=title,
+                max_results=10,
+                sort_by=arxiv.SortCriterion.Relevance
+            )
 
-            for entry in feed.entries:
-                title = entry.get("title", "")
-                authors = [a.name for a in entry.get("authors", [])]
-                self.compare(title, authors, "arXiv", url)
-        except Timeout:
-            print("ArXiv timeout on url, retrying", url)
-            sleep(2)
-            self.search_arxiv()
+            client = arxiv.Client()   # new style API
+            for result in client.results(search):
+                title = result.title
+                authors = [str(a) for a in result.authors]
+                link = result.entry_id  # stable arXiv URL
+                self.compare(title, authors, "arXiv", link)
 
-    def search_googlebooks(self):
-        url = f"https://www.googleapis.com/books/v1/volumes?q={self.search_title}"
+                if self.match_percent >= 0.99:
+                    break
+
+        except Exception as e:
+            print("arXiv search error:", e)
+
+
+
+    def search_googlebooks(self, title):
+        url = f"https://www.googleapis.com/books/v1/volumes?q={title}"
         try:
             r = requests.get(url, timeout=30)
             if r.status_code == 200:
@@ -356,7 +479,7 @@ class Citation:
         except requests.exceptions.Timeout:
             print("Googlebooks timeout on url, retrying", url)
             sleep(2)
-            self.search_googlebooks()
+            self.search_googlebooks(title)
 
 
     def write_to_csv(self, writer):
@@ -370,6 +493,12 @@ class Citation:
 
         print(color + self.number, self.entry, "Closest Match: ", self.match_title, self.match_authors)
         print('\n')
+
+    def write_not_found(self):
+        if self.match_percent < 0.99:
+            print(self.number, self.entry, "Closest Match: ", self.match_title, self.match_authors)
+            print(self.title)
+            print('\n')
 
 class Bibliography:
     bib_text = ""
@@ -385,6 +514,8 @@ class Bibliography:
         entries = re.split(r"\[\d+\]", self.bib_text)
         for i, entry in enumerate(entries, 1):
             clean = " ".join(entry.split()).strip()
+            if not clean:
+                continue
             self.entries.append(Citation(i, entry))
 
     def parse_ieee(self):
@@ -392,6 +523,8 @@ class Bibliography:
         entries = re.findall(pattern, self.bib_text, re.DOTALL)
         for i, entry in entries:
             clean = " ".join(entry.split()).strip()
+            if not clean:
+                continue
             self.entries.append(Citation(i, entry))
 
     def populate(self, pdf_path):
@@ -399,8 +532,8 @@ class Bibliography:
         text = "\n".join(page.extract_text() or "" for page in reader.pages)
 
         # Find Bibliography
-        m = re.search(r"(r\s*e\s*f\s*e\s*r\s*e\s*n\s*c\s*e\s*s|b\s*i\s*b\s*l\s*i\s*o\s*g\s*r\s*a\s*p\s*h\s*y)", text, re.IGNORECASE)
-        start = m.start()
+        m = re.search(r"(R\s*e\s*f\s*e\s*r\s*e\s*n\s*c\s*e\s*s|R\s*E\s*F\s*E\s*R\s*E\s*N\s*C\s*E\s*S|B\s*i\s*b\s*l\s*i\s*o\s*g\s*r\s*a\s*p\s*h\s*y|B\s*I\s*B\s*L\s*I\s*O\s*G\s*R\s*A\s*P\s*H\s*Y)", text)
+        start = m.end()
 
         # If appendix, bibliography ends before it
         m2 = re.search(r"\bAppendix\b", text[start:], re.IGNORECASE)
@@ -418,10 +551,11 @@ class Bibliography:
     
 
     def validate(self):
+        #entry = self.entries[7]
+        #entry.validate()
         for entry in self.entries:
             entry.validate()
-            entry.write_to_stdout()
-        #self.entries[32].validate()
+            entry.write_not_found()
 
 
     def print_matches_to_csv(self, filename):
@@ -451,57 +585,46 @@ class Bibliography:
 #################################################
 #### Methods for Cleaning BibItems           ####
 #################################################
-def strip_numbers(text):
-    # Remove commas from large numbers
-    text = re.sub(r'(?<=\d),(?=\d)', '', text)    
-    # Remove all numbers
-    return re.sub(r" \d+ ", " ", text).strip()
-
 def normalize_text(s):
-    if not s:
-        return None
+    s0 = s.replace('-\n', '')
+    s0 = s0.replace('\n', ' ')
+    s0 = re.sub(r'[^A-Za-z0-9 ]+', ' ', s0)
+    s0 = s0.replace('  ', ' ');
+    return s0.lower().strip() 
 
-    s = s.strip(" .,;:")
-    s = html.unescape(s)
-    s = re.sub(r"<[^>]+>", "", s) 
-    s = unicodedata.normalize("NFC", s)    
-    s = re.sub(r"\s+([́̀̈^~])", r"\1", s)  # handles ´, `, ¨, ^, ~
-    s = re.sub(r"\s+", " ", s)
-    s = re.sub(r"[‐-‒–—−]", "-", s)
-    return s.lower().strip()
-
-def remove_hyphens(s):
-    s = s.replace("\n", " ")
-    s = re.sub(r"-\s+", "", s)
-    s = re.sub(r"\s+", " ", s)
-    return s
-
-def remove_newlines(s):
-    s = s.replace("\n", " ")
-    s = re.sub(r"-\s+", "-", s)
-    return s
-
-def create_tokens(text):
-    if not text:
-        return
-
-    tokens = list()
-    for word in text.split():
-        if any(ord(ch) > 127 for ch in word):
-            continue
-        clean = re.sub(r"[^a-z0-9]", "", word.lower())
-        if clean:
-            tokens.append(clean)
-    return set(tokens)
+def normalize_hyphen_text(s):
+    s1 = s.replace('-\n', '-')
+    s1 = s1.replace('\n', ' ')
+    s1 = re.sub(r'[^A-Za-z0-9 ]+', ' ', s1)
+    s1 = s1.replace('  ', ' ');
+    return s1.lower().strip()
 
 # ---------------------------
 # Main Logic
 # ---------------------------
+def first_author(input_authors, found_authors):
+    if not input_authors or not found_authors:
+        return False
+
+    # Take first input author (last name only, lowercase)
+    first_input = input_authors[0].lower()
+
+    for f in found_authors:
+        f = f.lower()
+        if len(f) <= 1:
+            continue
+        if first_input in f or f in first_input:
+            return True  # first author found
+
+    return False
+
 def authors_overlap(input_authors, found_authors):
     norm_in = [a.lower() for a in (input_authors or [])]
     norm_found = [a.lower() for a in (found_authors or [])]
 
     hits = 0
+    if not first_author(input_authors, found_authors):
+        return hits
     for a in norm_in:
         if len(a) <= 1:
             continue
