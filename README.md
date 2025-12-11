@@ -3,7 +3,9 @@ Analyzes IEEE, SIAM, and ACM format bibliographies for correctness.  The tool pa
 
 ## Installing BibChecker
 The bibcheck package can be installed with pip.  To install, run 
-```pip install .```
+
+`pip install .`
+
 from the outermost directly.
 
 ## Checking Citations in a PDF
