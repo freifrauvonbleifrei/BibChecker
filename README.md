@@ -18,4 +18,8 @@ After installing, you can check the accuracy of citations in a PDF through `bibc
 - `-springer` : Assume Springer-formatted bibliography
 - `-write_out` : Saves output to a word .docx file instead of printing to stdout.
 
+## Exclusions file
+The file `exclusions.json` includes keywords/phrases that indicates a citation should be excluded from the search.  For instance, if a reference contains a Github link, it is excluded from the search, as publicly available APIs will not be able to find codebases.  You can add additional exclusions by creating your own JSON file and passing it to the bibliography checker with `--exclude-file <exclusionfile.json>`.
+
+
 *Acknowledgement: ChatGPT was used to generate string comparison patterns and API search URLs.*
