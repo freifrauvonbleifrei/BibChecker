@@ -116,9 +116,13 @@ class Validate:
 
     # Compare Cited and Found Authors, using Levenstein ratio
     def compare_authors(self, citation, last_first = False):
-        citation.authors = re.sub(HYPHEN_SPACE, "", citation.authors)        
-        citation.authors = re.sub(HYPHENS, " ", citation.authors)
-        self.authors = [re.sub(HYPHENS, " ", a) for a in self.authors]
+        if (citation.authors):
+            citation.authors = re.sub(HYPHEN_SPACE, "", citation.authors)        
+            citation.authors = re.sub(HYPHENS, " ", citation.authors)
+
+        if self.authors:
+            self.authors = [re.sub(HYPHENS, " ", a) for a in self.authors]
+
         list0, list1 = replace_et_al(citation.authors, self.authors, last_first)
 
         if not list0 or not list1:
